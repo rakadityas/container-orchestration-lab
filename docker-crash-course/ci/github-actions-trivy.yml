@@ -1,0 +1,48 @@
+# Illustrative CI workflow for lesson 6 — not wired into this repo's own
+# Actions. Copy it into .github/workflows/ in a real project and adjust the
+# registry/tag steps for lesson 7 (pushing to ECR).
+name: build-and-scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Immutable tag: the git SHA, never a floating tag like `latest`.
+      # See ../06-image-security.md and ../07-ecr-deployment.md.
+      - name: Compute image tag
+        id: vars
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          docker build \
+            -t docker-crash-course-api:${{ steps.vars.outputs.tag }} \
+            ./app
+
+      # Scan BEFORE anything ever pushes to a registry. A HIGH/CRITICAL
+      # fixable vulnerability fails the job — see the flags explained in
+      # ../06-image-security.md.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: docker-crash-course-api:${{ steps.vars.outputs.tag }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      # Only reached if the scan step above didn't fail the job.
+      # See ../07-ecr-deployment.md for the ECR auth + push steps this
+      # would lead into (aws-actions/amazon-ecr-login, then docker push
+      # using the same immutable tag computed above).
+      - name: (next step in a real pipeline) push to ECR
+        run: echo "push docker-crash-course-api:${{ steps.vars.outputs.tag }} to ECR here"

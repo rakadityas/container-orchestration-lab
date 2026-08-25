@@ -1,0 +1,57 @@
+name: docker-crash-course
+
+services:
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: docker-crash-course-api:dev
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/appdb?sslmode=disable
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+networks:
+  # A user-defined bridge network. Compose gives every service on it DNS
+  # resolution by service name ("postgres", "redis"), which is why the API
+  # connects to those hostnames instead of localhost or an IP.
+  backend:
+    driver: bridge
+
+volumes:
+  pgdata:

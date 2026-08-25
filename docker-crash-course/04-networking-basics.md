@@ -1,78 +1,113 @@
 # 4. Docker Networking Basics
 
+## The big idea, in simple words
+
+Think of a container network like a **private WiFi network inside a house**.
+
+- Every container that joins this WiFi can talk to every other container on
+  it.
+- People **outside** the house cannot reach anything on this WiFi. The house
+  has no open door yet.
+- To let outside visitors reach one container, you must **open one specific
+  door** for it. This is called publishing a port.
+
+There is one more useful idea: a **phone book**. On a good network, you can
+call a container by its **name** ("call postgres"). On the old default
+network, there is no phone book, so you must know the exact **number** (the
+IP address), and that number can change.
+
 ## The default: bridge networking
 
-When the Docker daemon starts, it creates a virtual bridge interface on the
-host (`docker0`) — a software switch. Every container attached to the
-default bridge gets its own network namespace (see
-[lesson 1](01-containers-vs-vms.md)) with a virtual ethernet (`veth`) pair:
-one end lives inside the container's namespace as `eth0`, the other end
-plugs into the bridge on the host side. The bridge forwards traffic between
-attached containers and, via NAT, out to the host's real network.
+When Docker starts, it creates a virtual switch on your machine called
+`docker0`. Think of it as the WiFi router in the story above.
+
+Every container gets its own network namespace (see
+[lesson 1](01-containers-vs-vms.md)) and a **virtual cable** with two ends,
+called a `veth` pair:
+
+- one end is inside the container and is named `eth0`
+- the other end plugs into the `docker0` switch on the host
+
+The switch passes traffic between the containers. It also lets them reach
+the internet through the host's real network card, using NAT (network
+address translation).
 
 ```
 Host
-┌───────────────────────────────────────────────┐
-│                                                   │
+┌──────────────────────────────────────────────────┐
+│                                                  │
 │   docker0 (bridge, e.g. 172.17.0.1)              │
 │     ├── veth ── eth0  container A (172.17.0.2)   │
 │     └── veth ── eth0  container B (172.17.0.3)   │
-│                                                   │
-│   eth0 (host's real NIC) ── NAT ── internet       │
-└───────────────────────────────────────────────┘
+│                                                  │
+│   eth0 (host's real network card) ── NAT ── internet │
+└──────────────────────────────────────────────────┘
 ```
 
-Containers on the same bridge can reach each other directly by IP. They can
-reach the outside world through NAT on the host's real interface. Nothing
-outside the host can reach *into* a container unless you explicitly publish
-a port.
+So:
+
+- Containers on the same bridge can reach each other directly.
+- They can reach the internet through the host.
+- Nothing outside can reach *into* a container until you publish a port.
 
 ## The default bridge vs. a user-defined bridge
 
-Docker ships a default bridge network (literally named `bridge`), but it has
-a real limitation worth knowing: containers on it can only reach each other
-by IP address — there's no automatic DNS between them.
+Docker has one built-in network simply named `bridge`. It works, but it has
+one important limitation: **containers on it can only reach each other by IP
+address**. There is no phone book.
+
+A **user-defined bridge** is a network you create yourself. It includes a
+small DNS server, which is the phone book. Now containers can find each
+other by name.
 
 ```bash
 docker network create demo
 docker run -d --name api --network demo alpine sleep 3600
 docker run -d --name redis --network demo redis:7-alpine
-docker exec api ping -c1 redis   # resolves — user-defined bridge has embedded DNS
+docker exec api ping -c1 redis   # works! the name "redis" is resolved
 ```
 
-A **user-defined bridge** (`docker network create ...`, or whatever Compose
-creates for you automatically) gets an embedded DNS server that resolves
-container/service names to their current IP. This is *why*
-[`app/`](app/) connects to `postgres:5432` and `redis:6379` by hostname
-instead of a hardcoded IP — those hostnames are the service names Compose
-registered on the `backend` network in
-[`docker-compose.yml`](docker-compose.yml), and Compose always creates a
-user-defined bridge, never uses the legacy default one.
+This is *why* the code in [`app/`](app/) connects to `postgres:5432` and
+`redis:6379` using names instead of IP addresses. Those names are the
+service names written in [`docker-compose.yml`](docker-compose.yml).
+
+Good news: **Compose always creates a user-defined bridge for you.** It
+never uses the old default one. So you always get the phone book.
 
 ## Publishing ports: `-p host:container`
 
-By default, a container's ports are only reachable from other containers on
-the same network — nothing on the host, and nothing outside it, can connect
-in. `-p`/`--publish` opens a specific hole through NAT for that one port:
+By default, nobody outside the container network can connect to your
+container — not even you, from your own laptop. The `-p` option (also
+written `--publish`) opens one door:
 
 ```bash
 docker run -p 8080:8080 docker-crash-course-api:dev
 #           ^host  ^container
 ```
 
-This means: "traffic hitting the host on 8080, forward it to port 8080
-inside this container." The two numbers don't have to match —
-`-p 3000:8080` is legal and means the app still listens on 8080 *inside*
-the container, but you reach it via `localhost:3000` from the host.
+Read it as: "traffic arriving at the **host** on port 8080, send it to port
+8080 **inside** the container."
 
-`EXPOSE 8080` in a Dockerfile (see
-[`app/Dockerfile`](app/Dockerfile)) is **documentation only** — it doesn't
-publish anything by itself. It tells a reader (and `docker network`
-tooling) which port the process listens on; you still need `-p` (or
-Compose's `ports:`) to actually make it reachable from outside the
-container's network.
+The left number is outside. The right number is inside. **They do not have
+to match.**
 
-## What this project actually does
+```bash
+docker run -p 3000:8080 docker-crash-course-api:dev
+```
+
+Here the application still listens on port 8080 inside the container, but
+you open `localhost:3000` in your browser.
+
+### `EXPOSE` does not open anything
+
+`EXPOSE 8080` in a Dockerfile (see [`app/Dockerfile`](app/Dockerfile)) is
+**only a note for humans and tools**. It publishes nothing.
+
+Think of `EXPOSE` as a **label on a door** that says "port 8080 is behind
+here". The label does not unlock the door. You still need `-p` (or `ports:`
+in Compose) to actually open it.
+
+## What this project does
 
 Look at [`docker-compose.yml`](docker-compose.yml):
 
@@ -80,12 +115,12 @@ Look at [`docker-compose.yml`](docker-compose.yml):
 services:
   api:
     ports:
-      - "8080:8080"        # published to the host — you curl this
+      - "8080:8080"        # open to the host — you can curl this
     networks:
       - backend
 
   postgres:
-    # no ports: — reachable only from other containers on `backend`
+    # no ports: — only containers on `backend` can reach it
     networks:
       - backend
 
@@ -95,23 +130,25 @@ services:
       - backend
 ```
 
-Only `api` publishes a port to the host. `postgres` and `redis` are
-deliberately *not* published — nothing outside the `backend` network can
-reach them directly, including nothing on your laptop's `localhost`. The
-API reaches them because it's on the same user-defined bridge and can
-resolve `postgres` / `redis` by name via that network's embedded DNS. This
-is the same shape you want in production: only the service that needs to
-be internet- or LB-facing gets a published/exposed port; datastores stay
-reachable only from inside the network they share with the services that
-need them.
+Only `api` opens a door to the host. `postgres` and `redis` open **no
+doors** on purpose. Nothing outside the `backend` network can reach them —
+not even a program running directly on your laptop.
 
-## Quick diagnostics
+The API can still reach them because it sits on the same network and can
+look up the names `postgres` and `redis` in the phone book.
+
+This is the same shape you want in production:
+
+> Only the service that must face the internet gets a published port.
+> Databases stay reachable **only** from inside the network.
+
+## Useful commands for checking your network
 
 ```bash
-docker network ls                       # networks on this host
+docker network ls                       # list all networks
 docker network inspect docker-crash-course_backend
-docker compose exec api sh -c 'nslookup postgres'   # confirm DNS on the bridge
-docker port <container>                 # what's published, to where
+docker compose exec api sh -c 'nslookup postgres'   # test the phone book
+docker port <container>                 # show which doors are open
 ```
 
 Next: [docker-compose for a local stack](05-docker-compose-stack.md).

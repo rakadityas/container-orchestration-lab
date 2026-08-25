@@ -1,35 +1,56 @@
 # 3. Multi-Stage Builds for Small Go Images
 
-## The problem a single-stage build has
+## The big idea, in simple words
 
-Go compiles to a self-contained binary — there's no runtime interpreter and
-no dependency tree to ship. But the *toolchain that builds it* is huge: the
-`golang:1.24-bookworm` image is roughly 800MB+ once modules are downloaded,
-because it carries the compiler, linker, standard library sources, and a
-full Debian userland.
+Think about baking a cake.
 
-If you `FROM golang:1.24-bookworm` and stop there, every one of those build
-tools ships in your runtime image too — a compiler your API never touches
-in production, sitting in the image as both dead weight and attack surface.
+To bake it you need a big kitchen: an oven, bowls, flour, sugar, a mixer,
+and you make a big mess. But when you serve the cake to your guests, you
+only carry **the cake** to the table. You do not carry the oven, the flour
+bag, and the dirty bowls to the table too.
 
-## The fix: more than one `FROM`
+A **multi-stage build** does exactly this. The first stage is the messy
+kitchen where your program is compiled. The last stage is the clean plate
+that holds only the finished program.
 
-A multi-stage Dockerfile has multiple `FROM` instructions, each starting a
-new, independent stage. `COPY --from=<stage>` pulls specific files out of an
-earlier stage into a later one — nothing else about that earlier stage
-comes along. Only the *last* stage becomes the final image.
+Result: your final image goes from about **800 MB** down to under **20 MB**.
+
+## The problem with a single-stage build
+
+Go compiles into one self-contained file. There is no interpreter to ship
+and no library folder to ship.
+
+But the *tools that build it* are very large. The `golang:1.24-bookworm`
+image is around 800 MB or more after downloading libraries. It contains the
+compiler, the linker, the standard library source code, and a full Debian
+system.
+
+If you write `FROM golang:1.24-bookworm` and stop there, all of those tools
+are shipped inside your final image. Your API never uses a compiler in
+production. So the compiler is two bad things at once: wasted space, and
+extra tools that an attacker could use.
+
+## The fix: use more than one `FROM`
+
+A multi-stage Dockerfile has several `FROM` lines. Each `FROM` starts a new,
+separate stage. `COPY --from=<stage>` takes specific files out of an earlier
+stage. Nothing else from that stage is carried over.
+
+**Only the last stage becomes your final image.**
 
 ```dockerfile
-# ---- build stage ----
-FROM golang:1.24-bookworm AS build
+# ---- build stage (the messy kitchen) ----
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/api .
 
-# ---- runtime stage ----
+# ---- runtime stage (the clean plate) ----
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 WORKDIR /app
 COPY --from=build /out/api /app/api
@@ -37,58 +58,105 @@ USER nonroot:nonroot
 ENTRYPOINT ["/app/api"]
 ```
 
-The `build` stage has the compiler, the module cache, every `.go` file, and
-gigabytes of toolchain. None of it exists in the final image — only the one
-file named after `--from=build`, the compiled `/out/api` binary, gets
-copied across. This is exactly [`app/Dockerfile`](app/Dockerfile).
+The `build` stage holds the compiler, the downloaded libraries, every `.go`
+file, and gigabytes of tools. **None of it exists in the final image.** Only
+one single file crosses the line: the compiled program `/out/api`, taken by
+`COPY --from=build`.
 
-Check the size difference yourself once you've built the image:
+This is exactly what [`app/Dockerfile`](app/Dockerfile) does.
+
+Check the size yourself after you build:
 
 ```bash
 docker images docker-crash-course-api
-docker run --rm -it --entrypoint sh golang:1.24-bookworm -c \
-  'echo "the build stage alone is this big before we even discard it"'
 ```
 
-A single-stage equivalent of this image would be 800MB+; the actual
-distroless-based image comes in under 20MB.
+## Why `CGO_ENABLED=0` is the key that makes this work
 
-## Why `CGO_ENABLED=0` is what makes this possible
+Normally, Go can connect your program to the C library on the system (this
+feature is called cgo). A program built that way is **dynamically linked**.
+It needs that C library file to exist at runtime. So the final image must
+contain at least a C library, which means you need `alpine` or
+`debian-slim` as a minimum.
 
-By default Go's build can link against the host's C library (cgo) for
-things like DNS resolution or `net`/`os/user` on some platforms. A cgo
-binary is dynamically linked against `libc` — it needs that library present
-at runtime, which means the final image needs at least a `libc` (Alpine's
-`musl` or Debian's `glibc`).
+`CGO_ENABLED=0` forces Go to build a **fully static** program with **no
+external library needed at all**. Everything is inside the one file.
 
-`CGO_ENABLED=0` forces a fully static binary with **no external library
-dependencies at all**. That's the difference that lets the runtime stage be
-`distroless/static` (`libc`-free) or even `scratch` (literally empty)
-instead of needing `alpine` or `debian-slim` as a floor. Both drivers used
-in [`app/`](app/) — `lib/pq` and `go-redis`Redis — are pure Go, so nothing
-in this project needs cgo.
+Think of it like the difference between a **puzzle that needs a missing
+piece from another box** and a **single solid brick**. The solid brick works
+anywhere.
 
-`GOOS=linux GOARCH=amd64` pins the target platform explicitly. This matters
-if you're building on an Apple Silicon Mac (`darwin/arm64`) for an `amd64`
-Linux host — without it, Go defaults to your host's OS/arch and the binary
-won't run in the container at all. (For multi-architecture images — serving
-both `arm64` and `amd64` from the same tag — see `docker buildx build
---platform linux/amd64,linux/arm64`, out of scope for this crash course.)
+This is what allows the final stage to be `distroless/static` (no C library)
+or even `scratch` (a completely empty image). Both database drivers used in
+[`app/`](app/) — `lib/pq` for Postgres and `go-redis` for Redis — are
+written in pure Go, so this project never needs cgo.
 
-## Why `-trimpath -ldflags="-s -w"`
+## Why `GOOS` and `GOARCH` matter (and why you should not hardcode them)
 
-- **`-trimpath`** strips absolute build-machine file paths from the
-  compiled binary (they'd otherwise show up in panics/stack traces),
-  keeping the artifact reproducible and not leaking local filesystem
-  layout.
-- **`-ldflags="-s -w"`** drops the symbol table (`-s`) and DWARF debug
-  info (`-w`), shrinking the binary — you lose `delve`-style debugging
-  against the production binary, which is the right trade for a shipped
-  artifact (debug against a locally built binary with symbols instead).
+`GOOS` is the target operating system. `GOARCH` is the target CPU type.
 
-## Multiple build stages beyond just "build vs. runtime"
+The two common CPU types today are:
 
-Two `FROM`s is the minimum useful shape, but stages can do more:
+- `amd64` — Intel and AMD processors (most servers, older Macs, most PCs)
+- `arm64` — Apple Silicon Macs (M1, M2, M3, M4), AWS Graviton servers
+
+A program built for one CPU type **cannot run** on the other. If the types
+do not match, Docker tries to translate every instruction using an emulator
+called QEMU. This is very slow, and Go programs often **crash** under it
+with a confusing `SIGSEGV: segmentation violation` error.
+
+The safe solution is to never write the CPU type by hand. Docker provides
+these values automatically:
+
+| Variable | Meaning |
+|---|---|
+| `BUILDPLATFORM` | The machine doing the building (your laptop) |
+| `TARGETOS` | The operating system the image is for |
+| `TARGETARCH` | The CPU type the image is for |
+
+```dockerfile
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/api .
+```
+
+Read this in two parts:
+
+1. `--platform=$BUILDPLATFORM` tells Docker: **run the compiler natively**,
+   at full speed, with no emulator.
+2. `GOOS=$TARGETOS GOARCH=$TARGETARCH` tells Go: **build the output for the
+   target machine**. Go can cross-compile very well on its own, so it does
+   not need an emulator to do this.
+
+Together they mean: compile fast on the machine you have, and produce a
+program for the machine you want.
+
+To build one image that works on both CPU types, use:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t myimage:tag ./app
+```
+
+## Why `-trimpath` and `-ldflags="-s -w"`
+
+These two flags make the compiled program smaller and safer.
+
+- **`-trimpath`** removes the full folder paths from your build machine.
+  Without it, a crash message could show something like
+  `/Users/yourname/secret-project/main.go`. This leaks information about
+  your computer and also makes builds harder to reproduce.
+- **`-ldflags="-s -w"`** removes the symbol table (`-s`) and the debug
+  information (`-w`). This makes the file noticeably smaller.
+
+The cost of `-s -w` is that you cannot attach a debugger like `delve` to the
+production program. This is the right trade: debug a locally built version
+that still has the debug information instead.
+
+## More than two stages
+
+Two `FROM` lines is the smallest useful version. But stages can do more than
+"build" and "run".
 
 ```dockerfile
 FROM golang:1.24-bookworm AS base
@@ -115,11 +183,17 @@ USER nonroot:nonroot
 ENTRYPOINT ["/app/api"]
 ```
 
-`docker build --target test` runs only up through the `test` stage — useful
-for running the same Dockerfile in CI as both a test gate and an image
-build, sharing the exact same dependency layer between them. Stages that
-aren't reachable from the final `FROM` (like `lint` and `test` here) are
-never pulled into the shipped image regardless — only `COPY --from`
-reachability determines what ends up in the last stage.
+Here all stages share one `base` stage, so the libraries are downloaded only
+one time for all of them.
+
+```bash
+docker build --target test ./app     # stop after the test stage
+```
+
+This runs only up to the `test` stage. Now CI can use the same Dockerfile
+for testing and for building the image.
+
+Note that `lint` and `test` never reach the final image. The last stage
+never copies from them, and only what the last stage copies is shipped.
 
 Next: [Docker networking basics](04-networking-basics.md).

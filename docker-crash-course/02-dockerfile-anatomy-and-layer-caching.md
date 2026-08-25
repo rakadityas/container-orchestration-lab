@@ -1,49 +1,72 @@
 # 2. Dockerfile Anatomy & Layer Caching
 
-## Every instruction is a layer
+## The big idea, in simple words
 
-Each instruction in a Dockerfile that changes filesystem state (`RUN`,
-`COPY`, `ADD`) produces a new, immutable, content-addressed layer stacked on
-the one before it. Metadata-only instructions (`ENV`, `EXPOSE`, `USER`,
-`WORKDIR`, `ENTRYPOINT`, `CMD`, `ARG`) still create a layer in the image
-history, but it carries no filesystem diff.
+Think of a Dockerfile like a **tower of blocks**. Each line in the file adds
+one block on top of the tower.
+
+Docker is lazy, and this is good. If you build the same tower again, Docker
+says: "I already made this block last time. I will reuse it." This is called
+the **cache**, and it makes builds very fast.
+
+But there is one rule you must remember:
+
+> If you change a block near the **bottom**, every block **above** it falls
+> down and must be built again.
+
+So the whole skill of writing a good Dockerfile is simple: **put the things
+that rarely change at the bottom, and the things that change often at the
+top.**
+
+## Every instruction creates a layer
+
+Some instructions change files (`RUN`, `COPY`, `ADD`). Each of these creates
+a new layer. A layer is permanent and cannot be changed later.
+
+Other instructions only set information (`ENV`, `EXPOSE`, `USER`,
+`WORKDIR`, `ENTRYPOINT`, `CMD`, `ARG`). They also appear in the image
+history, but they add no files.
 
 ```dockerfile
-FROM golang:1.24-bookworm   # layer: base image
-WORKDIR /src                 # layer: metadata only
-COPY go.mod go.sum ./        # layer: filesystem diff (2 files added)
-RUN go mod download          # layer: filesystem diff (module cache populated)
-COPY . .                     # layer: filesystem diff (source added)
-RUN go build -o /out/api .   # layer: filesystem diff (binary added)
+FROM golang:1.24-bookworm   # layer: the base image
+WORKDIR /src                 # layer: information only, no files
+COPY go.mod go.sum ./        # layer: 2 files added
+RUN go mod download          # layer: downloaded libraries added
+COPY . .                     # layer: source code added
+RUN go build -o /out/api .   # layer: the compiled program added
 ```
 
-## The build cache: instructions are cached by layer, in order
+## How the cache decides to reuse a layer
 
-For each instruction, the builder checks whether it already has a cached
-layer for "this exact instruction, applied to this exact parent layer." If
-yes, it reuses the cached layer instead of re-executing anything. The moment
-one instruction misses the cache, **every instruction after it also
-misses** — even if a later instruction would otherwise have produced an
-identical result — because its parent layer is now different.
+For each line, Docker asks one question: "Do I already have a layer for
+*this exact instruction*, built on top of *this exact layer below it*?"
 
-Cache keys work differently for the two families of instruction:
+If the answer is yes, Docker reuses the old layer and runs nothing.
 
-- **`RUN`**: cached by the literal command string. `RUN go build .` and
-  `RUN go build .  ` (trailing space) are different cache keys.
-- **`COPY` / `ADD`**: cached by the *content* of the files being copied
-  (checksums), not just the command text. Change one byte in a copied file
-  and that layer — and everything after it — invalidates, even though the
-  `COPY` instruction's text didn't change.
+If the answer is no, Docker builds that layer again — **and every single
+line after it is also built again**. This happens even if a later line would
+have produced the same result. The reason is simple: the layer below it
+changed, so it is no longer the same tower.
 
-## Why instruction order is the whole game
+The two families of instruction are checked in different ways:
 
-This is the single highest-leverage thing to get right in a Dockerfile:
+- **`RUN`** — checked by the **text of the command**. `RUN go build .` and
+  `RUN go build .  ` (with extra spaces at the end) count as two different
+  commands.
+- **`COPY` / `ADD`** — checked by the **contents of the files** you copy,
+  not by the text. If you change one letter inside a copied file, that layer
+  and everything after it must be built again, even though the `COPY` line
+  itself looks the same.
+
+## Why the order of lines is everything
+
+This is the most valuable thing to learn about Dockerfiles:
 **put what changes least often first, and what changes most often last.**
 
-Compare two orderings of the same Go build:
+Look at two versions of the same Go build.
 
 ```dockerfile
-# ❌ source code changes bust the dependency-download layer every time
+# ❌ BAD: changing any source file re-downloads all libraries
 FROM golang:1.24-bookworm
 WORKDIR /src
 COPY . .
@@ -52,7 +75,7 @@ RUN go build -o /out/api .
 ```
 
 ```dockerfile
-# ✅ dependency layer only rebuilds when go.mod/go.sum change
+# ✅ GOOD: libraries are downloaded again only when go.mod/go.sum change
 FROM golang:1.24-bookworm
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -61,39 +84,56 @@ COPY . .
 RUN go build -o /out/api .
 ```
 
-In the first version, editing a single `.go` file invalidates `COPY . .`,
-which invalidates `go mod download` right after it — so every source change
-redownloads the entire module graph. In the second version (this is exactly
-what [`app/Dockerfile`](app/Dockerfile) does), the dependency manifests are
-copied and downloaded *before* the rest of the source, so editing
-`main.go` only busts the cache from `COPY . .` onward — `go mod download`
-stays cached and skipped.
+In the **bad** version, you edit one line in one `.go` file. This changes
+`COPY . .`, which sits *below* `go mod download`. So Docker must run
+`go mod download` again and download every library from the internet. This
+can take minutes, every single time you change one line of code.
 
-This generalizes: package manager manifests before source
-(`package.json`/`package-lock.json`, `requirements.txt`, `go.mod`/`go.sum`,
-`Cargo.toml`/`Cargo.lock`), install/download before `COPY . .`, and anything
-genuinely static (OS packages, fixed config) as early as possible.
+In the **good** version, the files that list your libraries (`go.mod` and
+`go.sum`) are copied first and downloaded first. They change rarely. So when
+you edit `main.go`, only the lines from `COPY . .` downward run again. The
+download stays cached and is skipped. This is exactly what
+[`app/Dockerfile`](app/Dockerfile) does.
 
-## `.dockerignore` shapes the cache too
+The same rule works in every language. Copy the file that lists your
+libraries first, install them, and only then copy your source code:
 
-`COPY . .` sends the *build context* — the whole directory tree it draws
-from — and its cache key is a hash of that context's contents. Files that
-change on every build but never affect the artifact (`.git/`, editor swap
-files, local `.env`s, previous build output) will bust the cache for no
-reason if they're included. [`app/.dockerignore`](app/.dockerignore)
-excludes exactly that class of file — see [lesson 6](06-image-security.md)
-for why this also matters for *security*, not just cache hits: an
-`.dockerignore` miss is how `.env` files and `.git` history end up baked
-into a shipped image.
+| Language | Copy these first |
+|---|---|
+| Go | `go.mod`, `go.sum` |
+| Node.js | `package.json`, `package-lock.json` |
+| Python | `requirements.txt` |
+| Rust | `Cargo.toml`, `Cargo.lock` |
+
+Put anything truly fixed (operating system packages, static config) as early
+as possible.
+
+## `.dockerignore` also protects the cache
+
+When you write `COPY . .`, Docker first sends the whole folder to the
+builder. This folder is called the **build context**. The cache check uses
+the contents of that folder.
+
+Some files change on every build but have no effect on your program:
+`.git/`, editor temporary files, local `.env` files, old build output. If
+Docker can see them, they break your cache for no reason at all.
+
+[`app/.dockerignore`](app/.dockerignore) lists exactly this kind of file so
+Docker ignores them. This also protects you for a second reason: security.
+See [lesson 6](06-image-security.md) — a missing `.dockerignore` line is how
+`.env` files with real passwords, and full `.git` history, accidentally end
+up inside a shipped image.
 
 ## `ARG` vs `ENV`
 
-- **`ARG`** — a build-time-only variable. Available during the build, gone
-  at runtime, not present in the final image's environment. Use it for
-  things like a Go version or a target platform.
-- **`ENV`** — persists into the running container's environment, and into
-  every subsequent layer's build environment too. Use it for values the
-  *application* needs at runtime (a default `PORT`, for example).
+Both hold values, but they live for different amounts of time.
+
+- **`ARG`** — exists **only while building**. It disappears when the build
+  finishes and is not inside the final image. Use it for things like a
+  version number or a target platform.
+- **`ENV`** — stays **inside the running container**, and is also visible to
+  every later line during the build. Use it for values your *application*
+  reads when it runs, for example a default `PORT`.
 
 ```dockerfile
 ARG GO_VERSION=1.24
@@ -102,27 +142,32 @@ FROM golang:${GO_VERSION}-bookworm AS build
 ENV PORT=8080
 ```
 
-Don't put secrets in either — `ARG` values are visible in `docker history`
-and cached layer metadata even though they don't ship in the final image's
-environment. Use `--secret` with BuildKit for anything sensitive a build
-step needs to read (an npm token, a private-module credential).
+**Never put passwords or secret keys in either one.** Even though `ARG`
+values do not stay in the final image's environment, anyone can still read
+them with `docker history`. If a build step truly needs a secret (an npm
+token, a private library password), use BuildKit's `--secret` option
+instead.
 
 ## `CMD` vs `ENTRYPOINT`
 
-- **`ENTRYPOINT`** is the fixed executable the container runs.
-- **`CMD`** supplies default *arguments* to it (or, with no `ENTRYPOINT`,
-  is itself the command) — and is overridden wholesale by anything passed
-  after `docker run <image>`.
+- **`ENTRYPOINT`** is the program the container always runs.
+- **`CMD`** gives default *arguments* to that program. If there is no
+  `ENTRYPOINT`, then `CMD` is the command itself. Anything you type after
+  `docker run <image>` replaces `CMD` completely.
 
-[`app/Dockerfile`](app/Dockerfile) uses only `ENTRYPOINT ["/app/api"]`
-because the API binary has nothing worth defaulting or overriding — it just
-runs. A CLI tool with commonly-overridden flags is the more typical case
-for splitting the two, e.g. `ENTRYPOINT ["myctl"]` + `CMD ["--help"]`.
+A simple way to remember it: `ENTRYPOINT` is the **car**, and `CMD` is the
+**default destination** you can change.
 
-## Read the Dockerfile now
+[`app/Dockerfile`](app/Dockerfile) uses only `ENTRYPOINT ["/app/api"]`. The
+API has no options worth changing — it simply runs. Splitting the two is
+more useful for a command-line tool, for example
+`ENTRYPOINT ["myctl"]` with `CMD ["--help"]`.
 
-Open [`app/Dockerfile`](app/Dockerfile) and match every instruction to a
-rule above: dependency files copied and downloaded before source, source
-copied after, `.dockerignore` trimming the context. The `ldflags`/`trimpath`
-build flags and the second `FROM` are covered next, in
-[multi-stage builds](03-multistage-builds-go.md).
+## Now read the real Dockerfile
+
+Open [`app/Dockerfile`](app/Dockerfile). Try to match every line to a rule
+above: library files copied and downloaded before the source code, source
+code copied after, and `.dockerignore` keeping the context small.
+
+The build flags (`-ldflags`, `-trimpath`) and the second `FROM` line are
+explained next, in [multi-stage builds](03-multistage-builds-go.md).

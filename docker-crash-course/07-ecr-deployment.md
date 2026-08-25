@@ -1,18 +1,35 @@
 # 7. How the Image Actually Reaches AWS ECR
 
-Everything so far produces a local image. This lesson covers the last mile:
-authenticating to a registry, pushing, and the two settings —
-tag immutability and lifecycle policy — that keep an ECR repository from
-becoming a liability once it's live. Reference only; no local execution
-needed, but the commands are real and safe to run against a sandbox AWS
-account if you have one.
+## The big idea, in simple words
 
-## Registry auth: short-lived tokens, not a stored password
+Until now, every image you built stayed on your own computer. This lesson is
+about sending it to a real storage place in the cloud, so servers can
+download and run it.
 
-ECR doesn't use a long-lived username/password like some registries. The
-AWS CLI exchanges your existing AWS credentials (an IAM user, role, or
-instance/task role) for a registry auth token that's valid for **12
-hours**, and pipes it straight into `docker login`:
+That storage place is called a **registry**. AWS calls its registry **ECR**
+(Elastic Container Registry). Docker Hub is another registry you already
+used when you pulled `postgres:16-alpine`.
+
+Three things matter here:
+
+1. **Getting in** — you receive a temporary visitor badge, not a permanent
+   key.
+2. **Locking the labels** — once a box has a name, nobody can move that name
+   to a different box.
+3. **Cleaning up** — old boxes are deleted automatically, so you do not pay
+   forever.
+
+This lesson is reference material. You do not need to run it locally, but
+the commands are real and safe to use with a test AWS account.
+
+## Getting in: short-lived tokens, not a stored password
+
+Many registries use a username and password that never expire. ECR does not
+work that way, and this is safer.
+
+Instead, the AWS CLI takes your existing AWS identity and exchanges it for a
+**temporary token** that is valid for **12 hours**. Then it passes that
+token straight to `docker login`.
 
 ```bash
 aws ecr get-login-password --region us-east-1 \
@@ -20,16 +37,29 @@ aws ecr get-login-password --region us-east-1 \
       <account-id>.dkr.ecr.us-east-1.amazonaws.com
 ```
 
-What's actually granting access here is IAM, not that token — the token is
-just a short-lived credential *derived from* whatever IAM identity ran the
-command. The IAM principal needs `ecr:GetAuthorizationToken` (registry-wide)
-plus `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`,
-`ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, and
-`ecr:CompleteLayerUpload` scoped to the specific repository, at minimum, to
-push. In CI, this is normally OIDC federation (GitHub Actions' `aws-actions/
-configure-aws-credentials` assuming a role via `id-token: write`) rather
-than a long-lived IAM user access key sitting in a CI secret — no
-long-lived AWS credential to leak in the first place.
+Think of it as a **visitor badge at a company reception**. The badge works
+today and stops working tomorrow. It is not a copy of the building's master
+key.
+
+The real permission comes from **IAM** (AWS's permission system), not from
+the token. The token is only a short-lived proof of an IAM identity.
+
+To push an image, the IAM identity needs at minimum:
+
+| Permission | Scope |
+|---|---|
+| `ecr:GetAuthorizationToken` | The whole registry |
+| `ecr:BatchCheckLayerAvailability` | The specific repository |
+| `ecr:InitiateLayerUpload` | The specific repository |
+| `ecr:UploadLayerPart` | The specific repository |
+| `ecr:CompleteLayerUpload` | The specific repository |
+| `ecr:PutImage` | The specific repository |
+
+In CI, do **not** store a permanent AWS access key as a secret. Use OIDC
+federation instead. With GitHub Actions, the action
+`aws-actions/configure-aws-credentials` together with `id-token: write` lets
+the job borrow an IAM role temporarily. If there is no permanent credential
+stored anywhere, there is no permanent credential to leak.
 
 ## Tag, then push
 
@@ -43,17 +73,24 @@ docker push \
   <account-id>.dkr.ecr.us-east-1.amazonaws.com/docker-crash-course-api:$(git rev-parse --short HEAD)
 ```
 
-`docker tag` doesn't copy anything — it adds a second name pointing at the
-same image ID. The registry hostname baked into the tag
-(`<account-id>.dkr.ecr.<region>.amazonaws.com/...`) is what tells `docker
-push` where to send it; ECR has no separate "upload" step distinct from
-this.
+Two things are worth understanding here.
 
-## Tag immutability — enforced at the registry, not just by convention
+**`docker tag` does not copy anything.** It only adds a second name that
+points to the same image. It is like giving a person a nickname — there is
+still only one person. This is instant and uses no extra disk space.
 
-[Lesson 6](06-image-security.md) covered *why* to avoid `:latest` and tag
-by SHA/version instead — that's a convention anyone can still break by
-typo or habit. ECR can enforce it as a repository setting:
+**The registry address is part of the name.** The long prefix
+`<account-id>.dkr.ecr.us-east-1.amazonaws.com/` is what tells `docker push`
+where to send the image. There is no separate "upload" command; the
+destination is written inside the tag itself.
+
+## Tag immutability — enforced by the registry
+
+[Lesson 6](06-image-security.md) explained *why* to avoid `:latest` and use
+a commit ID instead. But that is only a convention, and a person in a hurry
+can still break it.
+
+ECR can enforce the rule for you:
 
 ```bash
 aws ecr put-image-tag-mutability \
@@ -61,21 +98,31 @@ aws ecr put-image-tag-mutability \
   --image-tag-mutability IMMUTABLE
 ```
 
-With this set, `docker push` to a tag that **already exists** in the
-repository is rejected outright by ECR — not overwritten. This is what
-actually guarantees `docker-crash-course-api:a1b2c3d` means the same bits
-today and a year from now: nobody, including a CI job with valid push
-credentials, can silently replace what that tag points to. It also forces a
-real mistake to surface immediately (a re-run that tries to reuse a SHA
-tag fails loudly) instead of quietly overwriting a production reference.
+After this setting, pushing to a tag that **already exists** is **rejected**
+by ECR. It is not overwritten.
 
-## Lifecycle policy — because "keep everything forever" isn't free
+Think of it as writing the label in **permanent ink**. Nobody can change it
+later — not you, not a colleague, and not a CI job that has valid
+credentials.
 
-Every merge that triggers a build produces a new immutable tag; immutable
-tags are never overwritten and never automatically deleted. Left alone,
-that's unbounded storage growth (billed) and an ECR console impossible to
-find anything useful in. A **lifecycle policy** is a JSON ruleset ECR
-evaluates on its own schedule to expire images automatically:
+This gives you a real guarantee: `docker-crash-course-api:a1b2c3d` contains
+the same code today and one year from now.
+
+It also turns silent mistakes into loud ones. If a CI job accidentally runs
+twice and tries to reuse the same tag, the push fails immediately with a
+clear error. Without this setting, it would quietly replace an image that
+production may be using.
+
+## Lifecycle policy — because storing everything forever costs money
+
+Every merge creates a new image with a new permanent tag. Permanent tags are
+never overwritten and never deleted on their own.
+
+Over time this means two problems: your storage bill grows without limit,
+and the ECR console becomes so full that finding anything is difficult.
+
+A **lifecycle policy** is a set of rules, written in JSON, that ECR checks on
+its own schedule. It deletes old images for you automatically.
 
 ```json
 {
@@ -112,27 +159,43 @@ aws ecr put-lifecycle-policy \
   --lifecycle-policy-text file://lifecycle-policy.json
 ```
 
-Two rule shapes worth distinguishing:
+The two rules do different jobs:
 
-- **Untagged images** (`tagStatus: untagged`) — these are almost always
-  cache byproducts: an old layer superseded when a tag was reassigned
-  during a build's intermediate stages, or a manifest orphaned by some
-  other process. Rule 1 clears these aggressively (3 days) since nothing
-  should be referencing them by tag.
-- **Tagged images past a retention count** (`tagStatus: tagged` +
-  `imageCountMoreThan`) — real, immutable, previously-deployed builds.
-  Rule 2 keeps the most recent 30 and expires older ones. The count needs
-  to comfortably exceed how far back you'd ever plausibly roll back to —
-  losing the one tag currently referenced by a rollback target is the
-  failure mode to design around. `tagPrefixList` scopes this to your actual
-  release tags so it doesn't also start counting and expiring unrelated
-  tag patterns in the same repository.
+**Rule 1 — untagged images.** These are almost always leftovers: an old
+image that lost its name when a tag moved, or a file left behind by another
+process. Nothing points to them by name, so deleting them after 3 days is
+safe and aggressive.
 
-## Putting it together
+**Rule 2 — tagged images beyond a limit.** These are real builds that were
+possibly deployed at some time. This rule keeps the newest 30 and deletes
+older ones.
 
-The pipeline from [`ci/github-actions-trivy.yml`](ci/github-actions-trivy.yml)
-extends directly into this lesson: compute an immutable tag → build → scan
-with Trivy and fail on HIGH/CRITICAL → authenticate to ECR via OIDC-assumed
-IAM role → push to a tag-immutable repository → let the lifecycle policy
-handle cleanup on its own schedule. Nothing in that chain trusts a mutable
-pointer or a long-lived credential at any step.
+Choose the number carefully. The danger is deleting the exact version you
+need to roll back to. Pick a number comfortably larger than how far back you
+would ever realistically go.
+
+`tagPrefixList` limits the rule to your actual release tags (`v...` and
+`main-...`). Without it, the rule could start counting and deleting
+unrelated tags stored in the same repository.
+
+## Putting it all together
+
+The pipeline in [`ci/github-actions-trivy.yml`](ci/github-actions-trivy.yml)
+continues directly into this lesson. The full chain looks like this:
+
+```
+compute an immutable tag from the git commit
+        ↓
+build the image
+        ↓
+scan with Trivy — stop here if HIGH or CRITICAL is found
+        ↓
+log in to ECR using a temporary OIDC role
+        ↓
+push to a repository where tags cannot be changed
+        ↓
+lifecycle policy deletes old images automatically
+```
+
+Notice what this chain never does: it never trusts a name that can move, and
+it never uses a credential that lasts forever.

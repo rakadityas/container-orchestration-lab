@@ -5,7 +5,14 @@
       "Bash(podman compose *)",
       "Bash(echo \"exit=$?\")",
       "Read(//tmp/**)",
-      "Bash(xargs -I{} echo {})"
+      "Bash(xargs -I{} echo {})",
+      "Bash(docker --version)",
+      "Bash(podman --version)",
+      "Bash(podman machine *)",
+      "Bash(podman logs *)",
+      "Bash(curl -sf http://localhost:8080/healthz)",
+      "Bash(curl -sf http://localhost:8080/readyz)",
+      "Bash(podman ps *)"
     ]
   }
 }

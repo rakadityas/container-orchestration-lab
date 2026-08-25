@@ -46,6 +46,10 @@ below if that's your engine.
 ```bash
 cd docker-crash-course
 docker compose up --build
+
+or if using podman
+
+podman compose up -d --build
 ```
 
 Then, in another terminal:

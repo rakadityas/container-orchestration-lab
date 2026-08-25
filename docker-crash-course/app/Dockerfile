@@ -3,7 +3,12 @@
 # ---- build stage ---------------------------------------------------------
 # Pin the exact toolchain version, not `golang:latest` — a floating tag means
 # your build silently changes out from under you.
-FROM golang:1.24-bookworm AS build
+#
+# --platform=$BUILDPLATFORM runs the builder natively (no QEMU emulation)
+# even when cross-compiling for a different TARGETARCH below: Go's own
+# GOOS/GOARCH cross-compilation handles that without needing the toolchain
+# itself to run under emulation.
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
 
 WORKDIR /src
 
@@ -16,11 +21,19 @@ RUN go mod download
 # module-download layer above.
 COPY . .
 
+# TARGETOS/TARGETARCH are populated automatically by Docker from the build
+# target platform (native platform unless `docker build --platform` is
+# passed), so the binary always matches whatever the runtime stage below
+# actually needs — instead of a hardcoded amd64 that forces QEMU emulation
+# (and Go's netpoller crashes under that) on arm64 hosts like Apple Silicon.
+ARG TARGETOS
+ARG TARGETARCH
+
 # CGO_ENABLED=0 gives a static binary with no libc dependency, which is what
 # lets the final image be `scratch`/distroless instead of a full OS.
 # -trimpath and -ldflags="-s -w" drop debug symbols and local file paths,
 # shrinking the binary and avoiding leaking build-machine paths into it.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/api .
 
 # ---- runtime stage --------------------------------------------------------

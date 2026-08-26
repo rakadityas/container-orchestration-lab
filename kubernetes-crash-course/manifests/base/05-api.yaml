@@ -1,0 +1,93 @@
+# The Go API from the Docker course, running on Kubernetes.
+#
+# ⚠️ This is the DAY-1 version, on purpose. It is deliberately incomplete:
+# there are no health probes, no resource requests/limits, and no autoscaling
+# yet. Part 2 of this course adds all of that, and the finished version lives
+# in ../production/api-deployment.yaml.
+#
+# Deploy this first, break it, then fix it. That is the lesson.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo
+  labels:
+    app: api
+spec:
+  replicas: 3            # "always keep 3 apartments occupied" (lesson 2)
+  selector:
+    matchLabels:
+      app: api           # the pods I own wear this label
+  template:
+    metadata:
+      labels:
+        app: api         # MUST match the selector above, or pods multiply forever
+    spec:
+      serviceAccountName: api
+      containers:
+        - name: api
+          image: docker-crash-course-api:dev
+          # The image was pushed into kind with `kind load docker-image`, so
+          # it is already on the node. Never means "do not try the internet".
+          # Without this, Kubernetes tries Docker Hub and fails with
+          # ImagePullBackOff.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: api-config      # PORT, REDIS_ADDR
+            - secretRef:
+                name: api-secrets     # DATABASE_URL, POSTGRES_PASSWORD
+
+          # Defence in depth. The image is already distroless + nonroot from
+          # the Docker course; this makes Kubernetes enforce it too, so the
+          # protection survives someone swapping the base image later.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532                  # the distroless "nonroot" uid
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: demo
+  labels:
+    app: api
+spec:
+  type: ClusterIP        # internal only; the Ingress is the public door
+  selector:
+    app: api             # finds pods by LABEL, never by name or IP
+  ports:
+    - name: http
+      port: 80           # what callers use:  http://api
+      targetPort: 8080   # what the container listens on
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  namespace: demo
+spec:
+  # An Ingress OBJECT does nothing on its own. A controller must be
+  # installed to read it — we install ingress-nginx in lesson 6.
+  ingressClassName: nginx
+  rules:
+    - host: api.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80      # matches the Service `port`, not targetPort

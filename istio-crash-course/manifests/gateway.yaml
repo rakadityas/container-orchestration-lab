@@ -1,0 +1,22 @@
+# The building's front door (lesson 3).
+#
+# This REPLACES the plain Kubernetes Ingress from
+# kubernetes-crash-course/manifests/base/05-api.yaml once Istio is installed
+# — the two solve the same problem, but a request needs only one front
+# door. If both exist and both claim host `api.local`, remove or rename the
+# plain Ingress to avoid confusing whichever controller answers first.
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: api-gateway
+  namespace: demo
+spec:
+  selector:
+    istio: ingressgateway     # the ingress gateway pod installed in lesson 2
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "api.local"

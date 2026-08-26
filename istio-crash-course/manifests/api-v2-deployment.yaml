@@ -1,0 +1,56 @@
+# A second copy of the SAME image, labelled version: v2, purely so lesson 3
+# has two real subsets to split traffic between. In a genuine canary this
+# would be a different image tag; here the image is identical on purpose so
+# the lesson's focus stays on ROUTING, not on what changed in the app.
+#
+# IMPORTANT: this Deployment does not replace api in
+# kubernetes-crash-course/manifests/base/05-api.yaml — it deploys ALONGSIDE
+# it. Both must carry `app: api` (so they share the same Kubernetes Service)
+# but differ on `version` (so DestinationRule can tell them apart).
+#
+# The base api Deployment does not have a `version` label. Add one before
+# using this file, or the DestinationRule's v1 subset will match nothing:
+#   kubectl patch deployment api -n demo --type=merge -p \
+#     '{"spec":{"template":{"metadata":{"labels":{"version":"v1"}}}}}'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-v2
+  namespace: demo
+  labels:
+    app: api
+    version: v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: api
+        version: v2
+    spec:
+      serviceAccountName: api
+      containers:
+        - name: api
+          image: docker-crash-course-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: api-config
+            - secretRef:
+                name: api-secrets
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi

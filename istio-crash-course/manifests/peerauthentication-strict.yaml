@@ -1,0 +1,18 @@
+# Turns on mTLS for the whole `demo` namespace (lesson 4).
+#
+# STRICT means: sidecars in this namespace accept ONLY mutual-TLS
+# connections. A caller with no sidecar, or explicit plaintext, is
+# rejected.
+#
+# ⚠️ Only apply this AFTER confirming every relevant pod already has a
+# sidecar (`kubectl get pods -n demo` should show 2/2, not 1/1 — see
+# lesson 2). Flipping to STRICT before that cuts off any pod still running
+# plaintext-only.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: demo
+spec:
+  mtls:
+    mode: STRICT

@@ -1,0 +1,34 @@
+# The routing rules (lesson 3): 90% of traffic to v1, 10% to v2.
+#
+# Edit the two `weight` values and re-apply to shift traffic — no pod
+# restart needed. They must always add up to 100.
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: api
+  namespace: demo
+spec:
+  hosts:
+    - "api.local"      # traffic arriving through the Gateway
+    - "api"             # ALSO apply these rules to internal calls to
+                        # http://api from other pods in the mesh — with no
+                        # `gateways:` restriction below, this VirtualService
+                        # governs every caller, external or internal.
+  gateways:
+    - api-gateway
+    - mesh              # the reserved name for "every sidecar in the mesh"
+  http:
+    - route:
+        - destination:
+            host: api
+            subset: v1
+          weight: 90
+        - destination:
+            host: api
+            subset: v2
+          weight: 10
+      timeout: 3s
+      retries:
+        attempts: 3
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure

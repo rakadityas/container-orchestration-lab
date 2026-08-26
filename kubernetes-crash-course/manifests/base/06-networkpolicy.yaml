@@ -1,0 +1,146 @@
+# East-west traffic rules (lesson 5).
+#
+# ⚠️ These only work if your CNI enforces NetworkPolicy. kind's default
+# (kindnet) accepts the YAML and enforces NOTHING. That is why
+# kind-config.yaml disables it and lesson 6 installs Calico.
+#
+# The pattern is always the same: deny everything first, then open exactly
+# the doors you need.
+---
+# 1. DEFAULT DENY. `podSelector: {}` means "every pod in this namespace".
+#    With no rules listed below it, nothing is allowed in or out.
+#    Your app WILL break after this. That is correct. Now open doors.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# 2. ALLOW DNS. Do this immediately after any default-deny egress rule.
+#    Forgetting it is the #1 NetworkPolicy mistake: every hostname lookup
+#    silently times out and the errors look nothing like a network policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# 3. Let the Ingress controller reach the API. Without this, the front door
+#    exists but the receptionist cannot phone the room.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-api
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# 4. Let the API call OUT to Postgres and Redis.
+#    Egress rules are written on the SENDING side.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-egress-to-datastores
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# 5. Let Postgres RECEIVE connections, but only from the API.
+#    Ingress rules are written on the RECEIVING side — this policy is
+#    attached to postgres and says who may come in.
+#
+#    This is the rule that contains the damage: if an attacker takes over
+#    any other pod in this namespace, it still cannot reach the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-postgres
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# 6. Same for Redis.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-redis
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - protocol: TCP
+          port: 6379

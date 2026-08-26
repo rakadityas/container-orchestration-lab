@@ -1,0 +1,81 @@
+# Istio install profile tuned for a laptop-sized kind cluster.
+#
+# Uses the `default` profile (istiod + one ingress gateway) but lowers
+# resource REQUESTS well below Istio's own defaults, which are sized for a
+# real cluster with room to spare. Without this, istiod and the gateway
+# alone can ask for more CPU than a 3-node kind cluster has free, leaving
+# them Pending — the same "Insufficient cpu" symptom from
+# kubernetes-crash-course/08-resources-and-qos.md.
+#
+# Install with:
+#   istioctl install -f manifests/istio-install.yaml -y
+#
+# ⚠️ ONE IMPORTANT NOTE FOR REAL CLUSTERS
+#
+# This file uses the `IstioOperator` format. That format is still accepted
+# by `istioctl install` as a configuration file, which is how we use it
+# here.
+#
+# But the in-cluster *operator controller* (a controller you install into
+# the cluster, which watches IstioOperator objects and applies them for
+# you) is deprecated and has been removed in newer Istio versions.
+#
+# In short:
+#   ✅ `istioctl install -f this-file.yaml`   — fine, what we do
+#   ❌ `kubectl apply -f this-file.yaml`       — do NOT do this
+#
+# For production, the recommended path today is the official Helm charts
+# (../kubernetes-crash-course/13-helm-intro.md explains what Helm is).
+# The settings below map to Helm values with the same names.
+#
+# Add the CNI plugin (recommended if your namespace enforces restricted Pod
+# Security — see lesson 2) with:
+#   istioctl install -f manifests/istio-install.yaml --set components.cni.enabled=true -y
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: laptop-install
+spec:
+  profile: default
+
+  components:
+    pilot:                          # istiod — the control plane
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          # kind has no cloud LoadBalancer (see
+          # kubernetes-crash-course/03-services-and-ingress.md on Service
+          # types) — NodePort lets us reach it from the laptop instead.
+          service:
+            type: NodePort
+
+  meshConfig:
+    # Prints an access log line per request on the SIDECAR itself, so
+    # `kubectl logs <pod> -c istio-proxy` shows real traffic — the quickest
+    # way to confirm a request actually passed through the mesh.
+    accessLogFile: /dev/stdout
+
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 20m               # the sidecar itself, injected into EVERY pod
+            memory: 40Mi
+          limits:
+            memory: 128Mi

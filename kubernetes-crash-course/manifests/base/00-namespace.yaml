@@ -1,0 +1,13 @@
+# A namespace is a "floor of the building" (lesson 4).
+#
+# Everything in this course goes on the `demo` floor, never in `default`.
+# The big advantage: `kubectl delete namespace demo` removes ALL of it in
+# one command, with nothing left behind.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    # NetworkPolicy rules select namespaces by label, so give it one.
+    # Kubernetes also sets kubernetes.io/metadata.name automatically.
+    name: demo

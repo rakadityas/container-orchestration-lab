@@ -1,0 +1,103 @@
+# Postgres is a StatefulSet, not a Deployment (lesson 12).
+#
+# Why: it needs a stable name and its OWN disk that survives restarts. A
+# Deployment's pods are interchangeable and share nothing — that is wrong for
+# a database.
+---
+# A HEADLESS service (clusterIP: None). Instead of one shared address, DNS
+# returns each pod's own address, giving us the stable name:
+#     postgres-0.postgres.demo.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: demo
+  labels:
+    app: postgres
+spec:
+  clusterIP: None          # <- this is what makes it "headless"
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      # The `tcp-` prefix tells Istio to treat this as plain TCP rather than
+      # guessing a protocol from the name. See the note in 03-redis.yaml —
+      # the same convention, applied consistently.
+      name: tcp-postgres
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: demo
+spec:
+  serviceName: postgres    # must match the headless Service name above
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # Databases should shut down cleanly, not be killed mid-write.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: appdb
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: POSTGRES_PASSWORD
+            # A mounted volume has a lost+found directory at its root, which
+            # makes Postgres refuse to initialise. Putting the data in a
+            # SUBDIRECTORY avoids that. This is a classic gotcha.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          # The same readiness idea as the Compose healthcheck: "the container
+          # started" is not the same as "the database accepts connections".
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "appdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "appdb"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi     # no CPU limit on purpose — see lesson 8
+
+  # volumeClaimTemplates is the StatefulSet superpower: each pod gets its OWN
+  # PersistentVolumeClaim, and that disk is NOT deleted when the pod dies.
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,0 +1,74 @@
+# Redis is a plain Deployment, NOT a StatefulSet.
+#
+# Why the difference from Postgres? Because here Redis only holds hit
+# counters — a disposable cache. Losing it is acceptable. Exactly the same
+# decision as "redis has no volume" in the Docker course Compose file.
+#
+# If you used Redis for something you could not lose, it would need a
+# StatefulSet with a volume, like Postgres.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: demo
+  labels:
+    app: redis
+spec:
+  # ClusterIP (the default): reachable only from inside the cluster.
+  # No Ingress, no NodePort. Nothing outside can touch it.
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      # ⚠️ Named `tcp-redis`, NOT `redis`, on purpose.
+      #
+      # Istio picks a protocol from the port NAME's prefix, and `redis` is a
+      # protocol it recognises — it would route this through Envoy's special
+      # Redis proxy, which is limited and a known source of broken
+      # connections. The `tcp-` prefix keeps it as plain TCP.
+      #
+      # This matters only once you add Istio (see ../../istio-crash-course/),
+      # but naming it correctly from the start costs nothing.
+      name: tcp-redis
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

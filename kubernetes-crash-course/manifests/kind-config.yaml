@@ -1,0 +1,45 @@
+# kind cluster config for this course.
+#
+# Two things here are deliberate and worth understanding:
+#
+# 1. disableDefaultCNI: true
+#    kind's built-in network plugin (kindnet) ACCEPTS NetworkPolicy objects
+#    but silently enforces NOTHING. That would make lesson 5 a lie. We turn
+#    it off and install Calico instead, which really enforces policies.
+#
+# 2. extraPortMappings + the ingress-ready label
+#    These let the nginx Ingress controller receive traffic from your laptop
+#    on localhost:80. Without them, an Ingress in kind is unreachable.
+#
+# Create the cluster with:
+#   kind create cluster --name k8s-course --config manifests/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-course
+
+networking:
+  disableDefaultCNI: true       # we install Calico instead — see lesson 6
+  podSubnet: "192.168.0.0/16"   # the range Calico expects by default
+
+nodes:
+  # ---- control plane, also used as the ingress entry point ----------------
+  - role: control-plane
+    kubeadmConfigPatches:
+      # The nginx ingress controller only schedules onto a node carrying
+      # this label. Without it, the controller pod stays Pending forever.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80       # laptop:80  -> node:80  -> ingress controller
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  # ---- two workers, so topologySpreadConstraints in lesson 10 do something -
+  - role: worker
+  - role: worker

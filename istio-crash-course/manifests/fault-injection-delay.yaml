@@ -1,0 +1,36 @@
+# Deliberately injects a 5s delay into 50% of requests (lesson 5), to prove
+# your timeout/retry configuration actually does something before a real
+# incident forces you to find out.
+#
+# ⚠️ Uses the SAME name ("api") as virtualservice-canary.yaml on purpose.
+# Istio does not cleanly merge two separate VirtualServices that both claim
+# the same host through the same Gateway — applying this REPLACES the
+# canary VirtualService (kubectl apply updates the existing object, it does
+# not create a conflicting second one), and drops the 90/10 split for the
+# duration of the test.
+#
+# Apply, test, then restore the canary version — never leave this running:
+#   kubectl apply -f manifests/fault-injection-delay.yaml
+#   ...test...
+#   kubectl apply -f manifests/virtualservice-canary.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: api                  # same name as virtualservice-canary.yaml — replaces it
+  namespace: demo
+spec:
+  hosts:
+    - "api.local"
+  gateways:
+    - api-gateway
+  http:
+    - fault:
+        delay:
+          percentage:
+            value: 50.0
+          fixedDelay: 5s
+      route:
+        - destination:
+            host: api
+            subset: v1
+      timeout: 3s

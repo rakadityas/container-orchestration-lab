@@ -1,0 +1,69 @@
+# Autoscaling (lesson 9) and disruption protection (lesson 10).
+---
+apiVersion: autoscaling/v2          # v2, not v1 — v1 cannot do behavior/memory
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2      # never go below 2 — one pod is not highly available
+  maxReplicas: 10     # a cost ceiling; the HPA will never exceed it
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # ⚠️ This is 70% of the pod's CPU *request* (100m), i.e. ~70m.
+          # It is NOT 70% of a core. No CPU request = no CPU autoscaling.
+          averageUtilization: 70
+
+    # Memory scaling is deliberately NOT used here. Go's garbage collector
+    # holds memory and rarely returns it, so memory-based scaling tends to
+    # grow forever and never shrink back.
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0     # add capacity immediately
+      policies:
+        - type: Percent
+          value: 100                    # may double the pod count...
+          periodSeconds: 15             # ...every 15 seconds
+    scaleDown:
+      # Wait 5 minutes of sustained calm before removing pods. This prevents
+      # "flapping" — repeatedly adding and removing pods as traffic wobbles.
+      # Expect a delay here during testing; it is intentional, not a bug.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50                     # remove at most half at a time
+          periodSeconds: 60
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: demo
+spec:
+  # Protects against VOLUNTARY disruption only: kubectl drain, node
+  # upgrades, the cluster autoscaler removing a node. It cannot help when
+  # hardware fails — that is involuntary.
+  #
+  # Keep this STRICTLY BELOW the replica count. Setting minAvailable equal
+  # to replicas makes node drains impossible and blocks cluster upgrades
+  # forever.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api
+
+# Check with:
+#   kubectl get pdb -n demo
+# ALLOWED DISRUPTIONS should be 1 or more. A persistent 0 means maintenance
+# is blocked and something is wrong.

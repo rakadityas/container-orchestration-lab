@@ -1,0 +1,29 @@
+# Defines what "v1" and "v2" MEAN for the api Service (lesson 3) — a
+# VirtualService can only route to a subset that a DestinationRule has
+# already defined here.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api
+  namespace: demo
+spec:
+  host: api             # the plain Kubernetes Service name — unchanged
+  subsets:
+    - name: v1
+      labels:
+        version: v1      # pods carrying this label ARE the v1 subset
+    - name: v2
+      labels:
+        version: v2
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 10
+    outlierDetection:            # the circuit breaker — see lesson 5
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50

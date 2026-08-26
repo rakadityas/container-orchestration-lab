@@ -1,0 +1,24 @@
+# Standalone resilience-focused DestinationRule for lesson 5's exercises —
+# same shape as destinationrule.yaml but usable even before you've deployed
+# api-v2 / the canary split. If you already applied destinationrule.yaml,
+# you don't need this one too; they'd conflict (only one DestinationRule
+# per host is allowed).
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api
+  namespace: demo
+spec:
+  host: api
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 10
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50

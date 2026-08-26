@@ -1,0 +1,151 @@
+# The PRODUCTION version of the API Deployment.
+#
+# Compare this side by side with ../base/05-api.yaml. Everything added here
+# comes from Part 2, and each block is labelled with its lesson.
+#
+# Apply it over the base version:
+#   kubectl apply -f manifests/production/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo
+  labels:
+    app: api
+  annotations:
+    # Shows up in `kubectl rollout history` so you know WHY a version changed.
+    kubernetes.io/change-cause: "part 2: probes, resources, graceful shutdown"
+spec:
+  # NOTE: `replicas` is deliberately ABSENT.
+  #
+  # The HorizontalPodAutoscaler (hpa.yaml) owns this number. If we set it
+  # here too, every `kubectl apply` would reset the count and fight the HPA.
+  # Let the HPA own it. (lesson 9)
+
+  # ---- rollout strategy (lesson 10) --------------------------------------
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # add the new pod FIRST
+      maxUnavailable: 0    # never drop below full capacity
+  progressDeadlineSeconds: 600   # give up if a rollout stalls for 10 min
+  revisionHistoryLimit: 5        # keep 5 old ReplicaSets for rollback
+
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      serviceAccountName: api
+
+      # ---- graceful shutdown (lesson 11) ----------------------------------
+      # Must exceed preStop (10s) + the app's own shutdown timeout (10s).
+      terminationGracePeriodSeconds: 45
+
+      # ---- spread across failure domains (lesson 10) -----------------------
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          # ScheduleAnyway, NOT DoNotSchedule: during an incident it is far
+          # better to run an unevenly spread pod than no pod at all.
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
+
+      containers:
+        - name: api
+          image: docker-crash-course-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: api-config
+            - secretRef:
+                name: api-secrets
+
+          # ---- health probes (lesson 7) -------------------------------------
+          # startup: patience while booting. While it runs, the other two
+          # probes are paused. Our Go app starts in milliseconds, so this is
+          # mostly here as an example of the pattern.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            failureThreshold: 10
+            periodSeconds: 3            # up to 30s of patience
+
+          # readiness: "should traffic come to me?"  Failing = removed from
+          # the Service. Nothing is killed. It checks /readyz, which DOES
+          # test Postgres and Redis.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # liveness: "am I broken beyond repair?"  Failing = RESTART.
+          # It checks /healthz, which deliberately checks NOTHING external.
+          #
+          # ⚠️ Never point this at /readyz. A slow database would then restart
+          # every pod at once and turn a hiccup into a full outage. (lesson 7)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 15           # slower and calmer than readiness
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # ---- graceful shutdown (lesson 11) --------------------------------
+          # Removing a pod from Service endpoints is asynchronous and takes a
+          # few seconds to reach every node. Without this wait, traffic still
+          # arrives after the app has already exited -> dropped requests.
+          #
+          # The `sleep` handler works by default from Kubernetes 1.30 (it
+          # exists in 1.29 but is off unless a feature gate is enabled).
+          # Check yours with `kubectl version`. We cannot use
+          # `exec: sleep 10` because the distroless image has no shell.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+
+          # ---- resources (lesson 8) -----------------------------------------
+          # CPU request but NO cpu limit: guarantees our share, and allows
+          # using idle capacity instead of being throttled mid-request.
+          # Memory limit IS set, because memory cannot be reclaimed - going
+          # over means OOMKilled.
+          #
+          # The CPU request is also what the HPA measures its percentage
+          # against. Without it, CPU autoscaling cannot work at all.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+          # ---- security (Docker lesson 6 + K8s lesson 5) ---------------------
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

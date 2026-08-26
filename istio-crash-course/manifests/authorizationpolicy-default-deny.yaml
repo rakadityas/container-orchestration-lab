@@ -1,0 +1,15 @@
+# Default-deny for the `demo` namespace (lesson 4) — the same "start at
+# zero, open exactly what's needed" pattern as
+# kubernetes-crash-course/manifests/base/06-networkpolicy.yaml, one layer
+# up at the application/identity level instead of IP/port.
+#
+# An empty spec applied to a namespace with no other AuthorizationPolicy
+# selecting a workload denies ALL traffic to everything in it. Apply the
+# allow policy alongside this or the app becomes unreachable — that's
+# expected; it's the same lesson as Kubernetes default-deny.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: default-deny-all
+  namespace: demo
+spec: {}
